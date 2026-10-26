@@ -393,7 +393,16 @@ class FileProcessingTests(unittest.TestCase):
             second = root / "second.csv"
             output = root / "combined.csv"
             self.write_input(first, [transaction_line(description="First")])
-            self.write_input(second, [transaction_line(description="Second", amount="-2,50")])
+            self.write_input(
+                second,
+                [
+                    transaction_line(
+                        description="Second",
+                        reference="123456788",
+                        amount="-2,50",
+                    )
+                ],
+            )
 
             row_count = enhancer.parse_files([first, second], output)
 
@@ -410,7 +419,10 @@ class FileProcessingTests(unittest.TestCase):
             (root / "ignored.csv").mkdir()
             output = root / "combined.out"
             self.write_input(first, [transaction_line(description="First")])
-            self.write_input(second, [transaction_line(description="Second")])
+            self.write_input(
+                second,
+                [transaction_line(description="Second", reference="123456788")],
+            )
 
             row_count = enhancer.parse_files([root / "*.csv"], output)
 
@@ -418,6 +430,40 @@ class FileProcessingTests(unittest.TestCase):
             with output.open("r", encoding="utf-8-sig", newline="") as output_file:
                 rows = list(csv.DictReader(output_file, delimiter=";"))
             self.assertEqual([row["description"] for row in rows], ["First", "Second"])
+
+    def test_parse_files_removes_duplicate_transactions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.csv"
+            second = root / "second.csv"
+            output = root / "combined.csv"
+            self.write_input(
+                first,
+                [
+                    transaction_line(description="Original"),
+                    transaction_line(description="Unique", reference="123456788"),
+                ],
+            )
+            self.write_input(
+                second,
+                [
+                    transaction_line(description="Changed duplicate", amount="-9,99"),
+                    transaction_line(
+                        description="Other account",
+                        account="AT987654321098765432",
+                    ),
+                ],
+            )
+
+            row_count = enhancer.parse_files([first, second], output)
+
+            self.assertEqual(row_count, 3)
+            with output.open("r", encoding="utf-8-sig", newline="") as output_file:
+                rows = list(csv.DictReader(output_file, delimiter=";"))
+            self.assertEqual(
+                [row["description"] for row in rows],
+                ["Original", "Unique", "Other account"],
+            )
 
     def test_parse_files_rejects_wildcard_without_matching_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -484,7 +530,10 @@ class CliTests(unittest.TestCase):
             second = root / "second.csv"
             output = root / "output.csv"
             first.write_text(transaction_line(description="First") + "\n", encoding="cp1252")
-            second.write_text(transaction_line(description="Second") + "\n", encoding="cp1252")
+            second.write_text(
+                transaction_line(description="Second", reference="123456788") + "\n",
+                encoding="cp1252",
+            )
             stdout = io.StringIO()
 
             with patch.object(
@@ -506,7 +555,7 @@ class CliTests(unittest.TestCase):
                 encoding="cp1252",
             )
             (root / "b.csv").write_text(
-                transaction_line(description="Second") + "\n",
+                transaction_line(description="Second", reference="123456788") + "\n",
                 encoding="cp1252",
             )
             output = root / "output.out"

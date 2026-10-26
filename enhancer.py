@@ -226,6 +226,20 @@ def parse_input_file(input_path: Path) -> Iterator[dict[str, str]]:
             yield row
 
 
+def deduplicate_rows(
+    rows: Iterable[dict[str, str]],
+) -> Iterator[dict[str, str]]:
+    """Yield each transaction once, preserving its first occurrence."""
+    seen_transactions: set[tuple[str, str]] = set()
+
+    for row in rows:
+        transaction_key = (row["account"], row["reference"])
+        if transaction_key in seen_transactions:
+            continue
+        seen_transactions.add(transaction_key)
+        yield row
+
+
 def write_output_file(rows: Iterable[dict[str, str]], output_path: Path) -> int:
     """Atomically write parsed transaction rows to the output CSV file."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -305,7 +319,7 @@ def parse_files(input_paths: list[Path], output_path: Path) -> int:
         for input_path in input_paths
         for row in parse_input_file(input_path)
     )
-    return write_output_file(rows, output_path)
+    return write_output_file(deduplicate_rows(rows), output_path)
 
 
 def main() -> int:
