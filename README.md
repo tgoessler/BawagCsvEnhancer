@@ -15,9 +15,12 @@ Examples:
 ```bash
 python enhancer.py bawag-export.csv cleaned-transactions.csv
 python enhancer.py january.csv february.csv march.csv cleaned-transactions.csv
+python enhancer.py "exports/*.csv" cleaned-transactions.csv
 ```
 
-Each input is read as `cp1252`. Transactions are appended to the output in the order of the input files, with one output header. The semicolon-delimited output is written as UTF-8 with BOM (`utf-8-sig`). No input may be the same file as the output.
+Input arguments may contain wildcard patterns such as `*`, `?`, and `**`. Quoting a pattern lets the program expand it consistently across shells. Matches are processed in sorted order; a pattern without matching files causes an error.
+
+Each input is read as `cp1252`. Transactions are appended to the output in the order of the input arguments and their expanded matches, with one output header. The semicolon-delimited output is written as UTF-8 with BOM (`utf-8-sig`). No input may be the same file as the output.
 
 ## Input format
 

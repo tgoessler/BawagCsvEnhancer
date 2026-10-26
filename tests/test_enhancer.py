@@ -402,6 +402,37 @@ class FileProcessingTests(unittest.TestCase):
                 rows = list(csv.DictReader(output_file, delimiter=";"))
             self.assertEqual([row["description"] for row in rows], ["First", "Second"])
 
+    def test_parse_files_expands_wildcards_in_sorted_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.csv"
+            second = root / "b.csv"
+            (root / "ignored.csv").mkdir()
+            output = root / "combined.out"
+            self.write_input(first, [transaction_line(description="First")])
+            self.write_input(second, [transaction_line(description="Second")])
+
+            row_count = enhancer.parse_files([root / "*.csv"], output)
+
+            self.assertEqual(row_count, 2)
+            with output.open("r", encoding="utf-8-sig", newline="") as output_file:
+                rows = list(csv.DictReader(output_file, delimiter=";"))
+            self.assertEqual([row["description"] for row in rows], ["First", "Second"])
+
+    def test_parse_files_rejects_wildcard_without_matching_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pattern = root / "missing-*.csv"
+            output = root / "output.csv"
+
+            with self.assertRaisesRegex(
+                FileNotFoundError,
+                "Input pattern matched no files",
+            ):
+                enhancer.parse_files([pattern], output)
+
+            self.assertFalse(output.exists())
+
     def test_parse_files_rejects_empty_input_list(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "output.csv"
@@ -466,6 +497,30 @@ class CliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertIn("Success: wrote 2 transactions", stdout.getvalue())
             self.assertTrue(output.is_file())
+
+    def test_main_accepts_quoted_wildcard_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.csv").write_text(
+                transaction_line(description="First") + "\n",
+                encoding="cp1252",
+            )
+            (root / "b.csv").write_text(
+                transaction_line(description="Second") + "\n",
+                encoding="cp1252",
+            )
+            output = root / "output.out"
+            stdout = io.StringIO()
+
+            with patch.object(
+                sys,
+                "argv",
+                ["enhancer.py", str(root / "*.csv"), str(output)],
+            ), redirect_stdout(stdout):
+                exit_code = enhancer.main()
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("Success: wrote 2 transactions", stdout.getvalue())
 
     def test_main_reports_error_for_missing_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

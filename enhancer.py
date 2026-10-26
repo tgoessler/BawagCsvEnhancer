@@ -9,6 +9,7 @@ import re
 import sys
 import tempfile
 from collections.abc import Iterable, Iterator
+from glob import glob, has_magic
 from pathlib import Path
 
 
@@ -67,7 +68,7 @@ def parse_arguments() -> argparse.Namespace:
         "inputs",
         type=Path,
         nargs="+",
-        help="Paths to one or more original CSV files",
+        help="Paths or wildcard patterns for one or more original CSV files",
     )
     parser.add_argument("output", type=Path, help="Path to the new CSV file")
     return parser.parse_args()
@@ -264,11 +265,34 @@ def write_output_file(rows: Iterable[dict[str, str]], output_path: Path) -> int:
     return row_count
 
 
+def expand_input_paths(input_paths: list[Path]) -> list[Path]:
+    """Expand wildcard input patterns while preserving argument order."""
+    expanded_paths: list[Path] = []
+
+    for input_path in input_paths:
+        pattern = str(input_path)
+        if not has_magic(pattern):
+            expanded_paths.append(input_path)
+            continue
+
+        matches = sorted(
+            path
+            for match in glob(pattern, recursive=True)
+            if (path := Path(match)).is_file()
+        )
+        if not matches:
+            raise FileNotFoundError(f"Input pattern matched no files: {input_path}")
+        expanded_paths.extend(matches)
+
+    return expanded_paths
+
+
 def parse_files(input_paths: list[Path], output_path: Path) -> int:
     """Parse input files in order and combine them into one output CSV."""
     if not input_paths:
         raise ValueError("At least one input file is required.")
 
+    input_paths = expand_input_paths(input_paths)
     resolved_output = output_path.resolve()
     for input_path in input_paths:
         if not input_path.is_file():
