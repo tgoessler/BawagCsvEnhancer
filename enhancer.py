@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse and clean a BAWAG/PSK transaction export and save it as a new CSV."""
+"""Parse and combine BAWAG/PSK transaction exports into a new CSV."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import csv
 import re
 import sys
 import tempfile
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 
@@ -62,7 +63,12 @@ def parse_arguments() -> argparse.Namespace:
             "counterparties, and write the result to a new CSV file."
         )
     )
-    parser.add_argument("input", type=Path, help="Path to the original CSV file")
+    parser.add_argument(
+        "inputs",
+        type=Path,
+        nargs="+",
+        help="Paths to one or more original CSV files",
+    )
     parser.add_argument("output", type=Path, help="Path to the new CSV file")
     return parser.parse_args()
 
@@ -189,23 +195,44 @@ def extract_counterparty(row: dict[str, str]) -> dict[str, str]:
     return result
 
 
-def parse_file(input_path: Path, output_path: Path) -> int:
-    if not input_path.is_file():
-        raise FileNotFoundError(f"Input file not found: {input_path}")
+def parse_input_file(input_path: Path) -> Iterator[dict[str, str]]:
+    """Parse one input file and yield its cleaned transaction rows."""
+    with input_path.open("r", encoding="cp1252", newline="") as input_file:
+        for line_number, raw_line in enumerate(input_file, start=1):
+            line = raw_line.rstrip("\r\n")
+            if not line:
+                continue
 
-    if input_path.resolve() == output_path.resolve():
-        raise ValueError("Input and output files must not be identical.")
+            match = LINE_PATTERN.fullmatch(line)
+            if match is None:
+                raise ValueError(
+                    f"Line {line_number} in '{input_path}' does not match "
+                    f"the expected format:\n{line}"
+                )
 
+            row = match.groupdict(default="")
+            row.update(extract_counterparty(row))
+
+            row["extra"] = clean_extra(row["extra"])
+            row = {key: clean_text(value) for key, value in row.items()}
+
+            description = row["description"].rstrip("|").rstrip()
+            row["description"] = " ".join(
+                part for part in (description, row["extra"]) if part
+            ).rstrip("|").rstrip()
+            del row["extra"]
+
+            yield row
+
+
+def write_output_file(rows: Iterable[dict[str, str]], output_path: Path) -> int:
+    """Atomically write parsed transaction rows to the output CSV file."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
     row_count = 0
 
-    # Write to a temporary file first so an existing output file remains
-    # completely intact if processing fails.
     try:
-        with input_path.open(
-            "r", encoding="cp1252", newline=""
-        ) as input_file, tempfile.NamedTemporaryFile(
+        with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8-sig",
             newline="",
@@ -224,29 +251,7 @@ def parse_file(input_path: Path, output_path: Path) -> int:
             )
             writer.writeheader()
 
-            for line_number, raw_line in enumerate(input_file, start=1):
-                line = raw_line.rstrip("\r\n")
-                if not line:
-                    continue
-
-                match = LINE_PATTERN.fullmatch(line)
-                if match is None:
-                    raise ValueError(
-                        f"Line {line_number} does not match the expected format:\n{line}"
-                    )
-
-                row = match.groupdict(default="")
-                row.update(extract_counterparty(row))
-
-                row["extra"] = clean_extra(row["extra"])
-                row = {key: clean_text(value) for key, value in row.items()}
-
-                description = row["description"].rstrip("|").rstrip()
-                row["description"] = " ".join(
-                    part for part in (description, row["extra"]) if part
-                ).rstrip("|").rstrip()
-                del row["extra"]
-
+            for row in rows:
                 writer.writerow(row)
                 row_count += 1
 
@@ -259,11 +264,31 @@ def parse_file(input_path: Path, output_path: Path) -> int:
     return row_count
 
 
+def parse_files(input_paths: list[Path], output_path: Path) -> int:
+    """Parse input files in order and combine them into one output CSV."""
+    if not input_paths:
+        raise ValueError("At least one input file is required.")
+
+    resolved_output = output_path.resolve()
+    for input_path in input_paths:
+        if not input_path.is_file():
+            raise FileNotFoundError(f"Input file not found: {input_path}")
+        if input_path.resolve() == resolved_output:
+            raise ValueError("Input and output files must not be identical.")
+
+    rows = (
+        row
+        for input_path in input_paths
+        for row in parse_input_file(input_path)
+    )
+    return write_output_file(rows, output_path)
+
+
 def main() -> int:
     args = parse_arguments()
 
     try:
-        row_count = parse_file(args.input, args.output)
+        row_count = parse_files(args.inputs, args.output)
     except (OSError, UnicodeError, ValueError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1

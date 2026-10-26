@@ -7,16 +7,17 @@ A dependency-free Python CLI that cleans BAWAG/PSK transaction exports and adds 
 Requires Python 3.10 or newer.
 
 ```bash
-python enhancer.py <input.csv> <output.csv>
+python enhancer.py <input.csv> [<input.csv> ...] <output.csv>
 ```
 
-Example:
+Examples:
 
 ```bash
 python enhancer.py bawag-export.csv cleaned-transactions.csv
+python enhancer.py january.csv february.csv march.csv cleaned-transactions.csv
 ```
 
-The input is read as `cp1252`. The semicolon-delimited output is written as UTF-8 with BOM (`utf-8-sig`). Input and output must not be the same file.
+Each input is read as `cp1252`. Transactions are appended to the output in the order of the input files, with one output header. The semicolon-delimited output is written as UTF-8 with BOM (`utf-8-sig`). No input may be the same file as the output.
 
 ## Input format
 
@@ -41,7 +42,7 @@ German values such as `Bezahlung Karte` and `Gutschrift POS` are intentionally u
 
 ## Safety and privacy
 
-Output is written to a temporary file and replaces the target only after successful processing. On failure, existing output remains unchanged.
+Output is written to a temporary file and replaces the target only after all input files have been processed successfully. On failure, existing output remains unchanged.
 
 Bank exports contain sensitive data. Use synthetic test data and do not commit real CSV files. CSV files are not globally excluded by `.gitignore`.
 
