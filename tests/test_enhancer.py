@@ -386,7 +386,7 @@ class FileProcessingTests(unittest.TestCase):
 
             self.assertFalse(output.exists())
 
-    def test_parse_files_combines_files_in_input_order(self) -> None:
+    def test_parse_files_sorts_transactions_by_reference(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             first = root / "first.csv"
@@ -410,26 +410,23 @@ class FileProcessingTests(unittest.TestCase):
             with output.open("r", encoding="utf-8-sig", newline="") as output_file:
                 rows = list(csv.DictReader(output_file, delimiter=";"))
             self.assertEqual([row["description"] for row in rows], ["First", "Second"])
+            self.assertEqual(
+                [row["reference"] for row in rows],
+                ["123456789", "123456788"],
+            )
 
-    def test_parse_files_expands_wildcards_in_sorted_order(self) -> None:
+    def test_expand_input_paths_expands_wildcards_in_sorted_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             first = root / "a.csv"
             second = root / "b.csv"
             (root / "ignored.csv").mkdir()
-            output = root / "combined.out"
             self.write_input(first, [transaction_line(description="First")])
-            self.write_input(
-                second,
-                [transaction_line(description="Second", reference="123456788")],
-            )
+            self.write_input(second, [transaction_line(description="Second")])
 
-            row_count = enhancer.parse_files([root / "*.csv"], output)
+            expanded_paths = enhancer.expand_input_paths([root / "*.csv"])
 
-            self.assertEqual(row_count, 2)
-            with output.open("r", encoding="utf-8-sig", newline="") as output_file:
-                rows = list(csv.DictReader(output_file, delimiter=";"))
-            self.assertEqual([row["description"] for row in rows], ["First", "Second"])
+            self.assertEqual(expanded_paths, [first, second])
 
     def test_parse_files_removes_duplicate_transactions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -462,7 +459,7 @@ class FileProcessingTests(unittest.TestCase):
                 rows = list(csv.DictReader(output_file, delimiter=";"))
             self.assertEqual(
                 [row["description"] for row in rows],
-                ["Original", "Unique", "Other account"],
+                ["Original", "Other account", "Unique"],
             )
 
     def test_parse_files_rejects_wildcard_without_matching_files(self) -> None:

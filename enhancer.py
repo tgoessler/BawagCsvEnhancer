@@ -240,6 +240,13 @@ def deduplicate_rows(
         yield row
 
 
+def sort_rows_by_reference(
+    rows: Iterable[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Return transaction rows sorted by reference in descending order."""
+    return sorted(rows, key=lambda row: row["reference"], reverse=True)
+
+
 def write_output_file(rows: Iterable[dict[str, str]], output_path: Path) -> int:
     """Atomically write parsed transaction rows to the output CSV file."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -319,7 +326,9 @@ def parse_files(input_paths: list[Path], output_path: Path) -> int:
         for input_path in input_paths
         for row in parse_input_file(input_path)
     )
-    return write_output_file(deduplicate_rows(rows), output_path)
+    unique_rows = deduplicate_rows(rows)
+    sorted_rows = sort_rows_by_reference(unique_rows)
+    return write_output_file(sorted_rows, output_path)
 
 
 def main() -> int:
