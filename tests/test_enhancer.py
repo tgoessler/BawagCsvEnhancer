@@ -270,6 +270,151 @@ class FileProcessingTests(unittest.TestCase):
     def write_input(self, path: Path, lines: list[str]) -> None:
         path.write_text("\n".join(lines) + "\n", encoding="cp1252")
 
+    def test_deduplicate_rows_keeps_bank_and_card_identifiers_separate(self) -> None:
+        bank = output_row(
+            account=ACCOUNT, transaction_type="ZA", reference="123456789", amount="-1,00"
+        )
+        card = output_row(
+            account=ACCOUNT, counterparty_iban="123456789", amount="-2,00"
+        )
+        unidentified = output_row(account=ACCOUNT, description="EINZUGSBETRAG")
+
+        rows = list(enhancer.deduplicate_rows([
+            bank, card, {**bank, "amount": "-9,00"}, {**card, "amount": "-8,00"},
+            unidentified, unidentified,
+        ]))
+
+        self.assertEqual(rows, [bank, card, unidentified, unidentified])
+
+    def test_parse_credit_card_rows_preserves_identifier_and_empty_fields(self) -> None:
+        reference = "01234567890123456789012"
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "card.csv"
+            self.write_input(
+                input_path,
+                [f"{ACCOUNT};Example Shop...|{reference};21.01.2025;19.01.2025;-1.234,56;EUR"],
+            )
+
+            rows = list(enhancer.parse_input_file(input_path))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(list(rows[0]), EXPECTED_OUTPUT_COLUMNS)
+        self.assertEqual(rows[0], {
+            "account": ACCOUNT,
+            "description": "Example Shop.",
+            "transaction_type": "",
+            "reference": "",
+            "booking_date": "21.01.2025",
+            "value_date": "19.01.2025",
+            "amount": "-1.234,56",
+            "currency": "EUR",
+            "counterparty": "Example Shop...",
+            "counterparty_iban": reference,
+            "counterparty_bic": "",
+        })
+
+    def test_parse_files_combines_card_and_bank_rows_without_losing_unreferenced_rows(self) -> None:
+        reference = "01234567890123456789012"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            card = root / "card.csv"
+            bank = root / "bank.csv"
+            output = root / "output.csv"
+            settlement = f"{ACCOUNT};EINZUGSBETRAG;01.01.2025;01.01.2025;+12,34;EUR"
+            self.write_input(card, [
+                f"{ACCOUNT};Example Shop|{reference};01.01.2025;02.01.2025;-12,34;EUR",
+                settlement,
+                settlement,
+                f"{ACCOUNT};MANIPULATIONSENTGELT GBR;02.01.2025;02.01.2025;-1,00;EUR",
+            ])
+            self.write_input(bank, [transaction_line()])
+
+            count = enhancer.parse_files([card, bank, card], output)
+
+            with output.open("r", encoding="utf-8-sig", newline="") as output_file:
+                reader = csv.DictReader(output_file, delimiter=";")
+                self.assertEqual(reader.fieldnames, EXPECTED_OUTPUT_COLUMNS)
+                rows = list(reader)
+
+        self.assertEqual(count, 8)
+        self.assertEqual([row["reference"] for row in rows], ["123456789"] + [""] * 7)
+        self.assertEqual([row["description"] for row in rows[1:]], [
+            "MANIPULATIONSENTGELT GBR", "MANIPULATIONSENTGELT GBR", "Example Shop",
+            "EINZUGSBETRAG", "EINZUGSBETRAG", "EINZUGSBETRAG", "EINZUGSBETRAG",
+        ])
+        for row in rows[1:]:
+            with self.subTest(description=row["description"]):
+                expected_identifier = reference if row["description"] == "Example Shop" else ""
+                self.assertEqual(row["counterparty_iban"], expected_identifier)
+                expected_counterparty = row["description"] if expected_identifier else ""
+                self.assertEqual(row["counterparty"], expected_counterparty)
+                for column in ("transaction_type", "counterparty_bic"):
+                    self.assertEqual(row[column], "")
+
+    def test_credit_card_counterparty_normalizes_text_with_or_without_identifier(self) -> None:
+        cases = (
+            (r"  Example\\Shop..  |01234567890123456789012", "Example Shop..", "Example Shop."),
+            ("  EINZUGSBETRAG  ", "", "EINZUGSBETRAG"),
+            ("MANIPULATIONSENTGELT GBR", "", "MANIPULATIONSENTGELT GBR"),
+            ("Example Shop", "", "Example Shop"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "card.csv"
+            for description, counterparty, expected_description in cases:
+                with self.subTest(description=description):
+                    self.write_input(input_path, [
+                        f"{ACCOUNT};{description};01.01.2025;01.01.2025;-1,00;EUR",
+                    ])
+
+                    rows = list(enhancer.parse_input_file(input_path))
+
+                    self.assertEqual(rows[0]["counterparty"], counterparty)
+                    self.assertEqual(rows[0]["description"], expected_description)
+
+    def test_credit_card_sorting_uses_booking_dates_not_identifiers(self) -> None:
+        cases = [
+            ("Old year", "99999999999999999999999", "31.12.2024", "03.01.2025"),
+            ("New year", "11111111111111111111111", "01.01.2025", "31.12.2024"),
+            ("Settlement", "", "01.02.2025", "01.02.2025"),
+            ("Same date", "22222222222222222222222", "01.01.2025", "01.01.2025"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "card.csv"
+            output = root / "output.csv"
+            self.write_input(input_path, [
+                f"{ACCOUNT};{description}{'|' + identifier if identifier else ''};{booking_date};{value_date};-1,00;EUR"
+                for description, identifier, booking_date, value_date in cases
+            ])
+
+            self.assertEqual(enhancer.parse_files([input_path], output), 4)
+
+            with output.open("r", encoding="utf-8-sig", newline="") as output_file:
+                rows = list(csv.DictReader(output_file, delimiter=";"))
+
+        self.assertEqual([row["description"] for row in rows], [
+            "Settlement", "New year", "Same date", "Old year",
+        ])
+        self.assertTrue(all(row["reference"] == "" for row in rows))
+
+    def test_parse_credit_card_rejects_malformed_rows_and_preserves_output(self) -> None:
+        descriptions = ("Shop|ABC123", "Shop|", "Shop|123|456", "")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "card.csv"
+            output = root / "output.csv"
+            output.write_bytes(b"existing output")
+            for description in descriptions:
+                with self.subTest(description=description):
+                    self.write_input(input_path, [
+                        f"{ACCOUNT};Shop|01234567890123456789012;01.01.2025;02.01.2025;-1,00;EUR",
+                        f"{ACCOUNT};{description};01.01.2025;02.01.2025;-1,00;EUR",
+                    ])
+                    with self.assertRaisesRegex(ValueError, "Line 2 .*expected format"):
+                        enhancer.parse_files([input_path], output)
+                    self.assertEqual(output.read_bytes(), b"existing output")
+                    self.assertEqual(list(root.glob(".output.csv.*.tmp")), [])
+
     def test_parse_input_file_collapses_consecutive_periods_in_description(self) -> None:
         cases = (
             ("Payment... pending..", "", "Payment. pending."),
@@ -654,6 +799,57 @@ class FileProcessingTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_main_reports_duplicate_counts_for_both_formats(self) -> None:
+        for reference in ("123456789", "01234567890123456789012"):
+            with self.subTest(reference=reference), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                first = root / "first.csv"
+                second = root / "second.csv"
+                output = root / "output.csv"
+                if len(reference) == 9:
+                    original = transaction_line(reference=reference)
+                else:
+                    original = f"{ACCOUNT};Example Shop|{reference};01.01.2025;02.01.2025;-1,00;EUR"
+                unreferenced = f"{ACCOUNT};EINZUGSBETRAG;01.01.2025;01.01.2025;+1,00;EUR"
+                other_account = original.replace(ACCOUNT, "AT987654321098765432", 1)
+                first.write_text("\n".join([original, original, unreferenced]) + "\n", encoding="cp1252")
+                second.write_text("\n".join([original, other_account, unreferenced]) + "\n", encoding="cp1252")
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+
+                with patch.object(
+                    sys, "argv", ["enhancer.py", str(first), str(second), str(output)]
+                ), redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = enhancer.main()
+
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(stderr.getvalue(), "Info: removed 2 duplicate transactions.\n")
+                self.assertIn("Success: wrote 4 transactions", stdout.getvalue())
+                with output.open("r", encoding="utf-8-sig", newline="") as output_file:
+                    rows = list(csv.DictReader(output_file, delimiter=";"))
+                self.assertEqual(len(rows), 4)
+                self.assertEqual(sum(
+                    not row["reference"] and not row["counterparty_iban"] for row in rows
+                ), 2)
+
+    def test_main_does_not_report_removed_duplicates_when_output_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "input.csv"
+            output = root / "output.csv"
+            input_path.write_text((transaction_line() + "\n") * 2, encoding="cp1252")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with patch.object(
+                sys, "argv", ["enhancer.py", str(input_path), str(output)]
+            ), patch("enhancer.write_output_file", side_effect=OSError("output locked")), redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = enhancer.main()
+
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(stderr.getvalue(), "Error: output locked\n")
+
     def test_main_reports_malformed_input_and_preserves_existing_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -686,16 +882,18 @@ class CliTests(unittest.TestCase):
                 encoding="cp1252",
             )
             stdout = io.StringIO()
+            stderr = io.StringIO()
 
             with patch.object(
                 sys,
                 "argv",
                 ["enhancer.py", str(first), str(second), str(output)],
-            ), redirect_stdout(stdout):
+            ), redirect_stdout(stdout), redirect_stderr(stderr):
                 exit_code = enhancer.main()
 
             self.assertEqual(exit_code, 0)
             self.assertIn("Success: wrote 2 transactions", stdout.getvalue())
+            self.assertEqual(stderr.getvalue(), "Info: removed 0 duplicate transactions.\n")
             self.assertTrue(output.is_file())
 
     def test_main_accepts_quoted_wildcard_input(self) -> None:

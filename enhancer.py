@@ -9,19 +9,36 @@ import re
 import sys
 import tempfile
 from collections.abc import Iterable, Iterator
+from datetime import datetime
 from glob import glob, has_magic
 from pathlib import Path
 
+
+# Both input layouts share the same date, amount and currency fields.
+TRANSACTION_DETAILS_PATTERN = (
+    r";"
+    r"(?P<booking_date>\d{2}\.\d{2}\.\d{4});"
+    r"(?P<value_date>\d{2}\.\d{2}\.\d{4});"
+    r"(?P<amount>[+-](?:\d{1,3}(?:\.\d{3})*|\d+),\d{2});"
+    r"(?P<currency>[A-Z]{3})$"
+)
 
 LINE_PATTERN = re.compile(
     r"^(?P<account>AT\d{18});"
     r"(?P<description>.*?)[ \t]*"
     r"(?P<transaction_type>[A-Z]{2})/(?P<reference>\d{9})"
-    r"(?:\|(?P<extra>[^;\r\n]*))?;"
-    r"(?P<booking_date>\d{2}\.\d{2}\.\d{4});"
-    r"(?P<value_date>\d{2}\.\d{2}\.\d{4});"
-    r"(?P<amount>[+-](?:\d{1,3}(?:\.\d{3})*|\d+),\d{2});"
-    r"(?P<currency>[A-Z]{3})$"
+    r"(?:\|(?P<extra>[^;\r\n]*))?"
+    + TRANSACTION_DETAILS_PATTERN
+)
+
+# Reject malformed giro markers instead of accepting them as merchant names.
+# The numeric card identifier is stored in counterparty_iban, but is not an IBAN.
+CREDIT_CARD_LINE_PATTERN = re.compile(
+    r"^(?P<account>AT\d{18});"
+    r"(?![^;]*[A-Za-z]{2}/[0-9]+(?:\||;))"
+    r"(?P<description>[^;|\r\n]*[^\s;|])[ \t]*"
+    r"(?:\|(?P<counterparty_iban>[0-9]+))?"
+    + TRANSACTION_DETAILS_PATTERN
 )
 
 ACCOUNT_PATTERN = re.compile(
@@ -80,6 +97,8 @@ def is_valid_iban(iban: str) -> bool:
         return False
 
     remainder = 0
+    # IBAN checks move the first four characters to the end and map A-Z to 10-35.
+    # Reduce each digit modulo 97 to avoid constructing one very large integer.
     for character in iban[4:] + iban[:4]:
         digits = str(ord(character) - 55) if character.isalpha() else character
         for digit in digits:
@@ -136,6 +155,8 @@ def extract_counterparty(row: dict[str, str]) -> dict[str, str]:
         "counterparty_bic": "",
     }
 
+    # A name following a valid IBAN takes priority over all merchant heuristics.
+    # Each successful rule returns immediately so later rules cannot overwrite it.
     account_match = find_account(extra)
     if account_match is not None:
         result["counterparty_iban"] = account_match.group("iban")
@@ -150,25 +171,16 @@ def extract_counterparty(row: dict[str, str]) -> dict[str, str]:
             result["counterparty"] = party
             return result
 
-    # For newer card payments and card credits, the merchant is usually in
-    # the second pipe-delimited segment.
-    if transaction_type == "MC" and (
-        description == "Bezahlung Karte" or description.startswith("Gutschrift")
-    ):
-        if len(segments) >= 2:
-            merchant = clean_merchant(segments[1])
-            if merchant:
-                result["counterparty"] = merchant
-                return result
-
-    # Older POS credits also store terminal data and the merchant in separate
-    # pipe-delimited segments.
-    if transaction_type == "VD" and description.startswith("Gutschrift POS"):
-        if len(segments) >= 2:
-            merchant = clean_merchant(segments[1])
-            if merchant:
-                result["counterparty"] = merchant
-                return result
+    # These card/POS layouts put terminal data first and the merchant second.
+    uses_second_segment = (
+        transaction_type == "MC"
+        and (description == "Bezahlung Karte" or description.startswith("Gutschrift"))
+    ) or (transaction_type == "VD" and description.startswith("Gutschrift POS"))
+    if uses_second_segment and len(segments) >= 2:
+        merchant = clean_merchant(segments[1])
+        if merchant:
+            result["counterparty"] = merchant
+            return result
 
     # Some older POS transactions store the merchant in the extra field.
     if transaction_type == "VD" and description.startswith("POS") and segments:
@@ -204,23 +216,31 @@ def parse_input_file(input_path: Path) -> Iterator[dict[str, str]]:
             if not line:
                 continue
 
-            match = LINE_PATTERN.fullmatch(line)
+            # Try the more specific giro layout first; both may occur in one file.
+            match = LINE_PATTERN.fullmatch(line) or CREDIT_CARD_LINE_PATTERN.fullmatch(line)
             if match is None:
                 raise ValueError(
                     f"Line {line_number} in '{input_path}' does not match "
                     f"the expected format:\n{line}"
                 )
 
-            row = match.groupdict(default="")
-            row.update(extract_counterparty(row))
+            # Initialize the complete output schema so missing fields stay empty.
+            row = {column: "" for column in OUTPUT_COLUMNS}
+            row.update(match.groupdict(default=""))
+            if match.re is CREDIT_CARD_LINE_PATTERN:
+                if row["counterparty_iban"]:
+                    row["counterparty"] = row["description"]
+            else:
+                row.update(extract_counterparty(row))
 
-            row["extra"] = clean_extra(row["extra"])
+            # Extract counterparties before removing account data and separators.
+            # Only the remaining supplementary text is merged into the description.
+            extra = clean_text(clean_extra(row.pop("extra", "")))
             row = {key: clean_text(value) for key, value in row.items()}
 
             description = row["description"].rstrip("|").rstrip()
-            description = " ".join(part for part in (description, row["extra"]) if part).rstrip("|").rstrip()
+            description = " ".join(part for part in (description, extra) if part).rstrip("|").rstrip()
             row["description"] = re.sub(r"\.{2,}", ".", description.replace("|", ""))
-            del row["extra"]
 
             yield row
 
@@ -228,11 +248,19 @@ def parse_input_file(input_path: Path) -> Iterator[dict[str, str]]:
 def deduplicate_rows(
     rows: Iterable[dict[str, str]],
 ) -> Iterator[dict[str, str]]:
-    """Yield each transaction once, preserving its first occurrence."""
-    seen_transactions: set[tuple[str, str]] = set()
+    """Deduplicate by bank reference or card identifier, retaining unidentified rows."""
+    seen_transactions: set[tuple[str, str, str]] = set()
 
     for row in rows:
-        transaction_key = (row["account"], row["reference"])
+        # Separate identifier namespaces prevent giro/card number collisions.
+        if row["reference"]:
+            transaction_key = (row["account"], "reference", row["reference"])
+        elif not row["transaction_type"] and row["counterparty_iban"]:
+            transaction_key = (row["account"], "credit_card", row["counterparty_iban"])
+        else:
+            # Identical-looking rows without an identifier may be distinct payments.
+            yield row
+            continue
         if transaction_key in seen_transactions:
             continue
         seen_transactions.add(transaction_key)
@@ -242,8 +270,18 @@ def deduplicate_rows(
 def sort_rows_by_reference(
     rows: Iterable[dict[str, str]],
 ) -> list[dict[str, str]]:
-    """Return transaction rows sorted by reference in descending order."""
-    return sorted(rows, key=lambda row: row["reference"], reverse=True)
+    """Sort bank rows by reference, followed by card rows by booking date."""
+
+    def sort_key(row: dict[str, str]) -> tuple[bool, str]:
+        # With reverse=True, giro rows (True) precede card rows (False).
+        if row["reference"]:
+            return True, row["reference"]
+        # DD.MM.YYYY cannot be sorted alphabetically; ISO dates can.
+        booking_date = datetime.strptime(row["booking_date"], "%d.%m.%Y")
+        return False, booking_date.date().isoformat()
+
+    # Python's stable sort preserves input order when keys are equal.
+    return sorted(rows, key=sort_key, reverse=True)
 
 
 def write_output_file(rows: Iterable[dict[str, str]], output_path: Path) -> int:
@@ -253,6 +291,7 @@ def write_output_file(rows: Iterable[dict[str, str]], output_path: Path) -> int:
     row_count = 0
 
     try:
+        # Use the target directory so replacement stays on the same filesystem.
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8-sig",
@@ -276,8 +315,10 @@ def write_output_file(rows: Iterable[dict[str, str]], output_path: Path) -> int:
                 writer.writerow(row)
                 row_count += 1
 
+        # Replace the target only after all rows are written and the file is closed.
         temporary_path.replace(output_path)
     except BaseException:
+        # Also remove partial output after interruptions such as Ctrl+C.
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
         raise
@@ -320,14 +361,22 @@ def parse_files(input_paths: list[Path], output_path: Path) -> int:
         if input_path.resolve() == resolved_output:
             raise ValueError("Input and output files must not be identical.")
 
-    rows = (
-        row
-        for input_path in input_paths
-        for row in parse_input_file(input_path)
-    )
-    unique_rows = deduplicate_rows(rows)
+    input_count = 0
+
+    def read_rows() -> Iterator[dict[str, str]]:
+        nonlocal input_count
+        for input_path in input_paths:
+            for row in parse_input_file(input_path):
+                input_count += 1
+                yield row
+
+    # Count before deduplication without keeping an extra list of all input rows.
+    unique_rows = deduplicate_rows(read_rows())
     sorted_rows = sort_rows_by_reference(unique_rows)
-    return write_output_file(sorted_rows, output_path)
+    row_count = write_output_file(sorted_rows, output_path)
+    # Report removals only after a successful export, never after a failed write.
+    print(f"Info: removed {input_count - row_count} duplicate transactions.", file=sys.stderr)
+    return row_count
 
 
 def main() -> int:

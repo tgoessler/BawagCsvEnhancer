@@ -1,6 +1,6 @@
 # BAWAG CSV Enhancer
 
-A dependency-free Python CLI that cleans BAWAG/PSK transaction exports and adds detected counterparty information.
+A dependency-free Python CLI that cleans BAWAG/PSK giro and credit card exports and adds counterparty information.
 
 ## Requirements and usage
 
@@ -10,44 +10,57 @@ Requires Python 3.10 or newer.
 python enhancer.py <input.csv> [<input.csv> ...] <output.csv>
 ```
 
-Examples:
+Multiple files and quoted wildcard patterns are supported, for example:
 
 ```bash
-python enhancer.py bawag-export.csv cleaned-transactions.csv
-python enhancer.py january.csv february.csv march.csv cleaned-transactions.csv
 python enhancer.py "exports/*.csv" cleaned-transactions.csv
 ```
 
-Input arguments may contain wildcard patterns such as `*`, `?`, and `**`. Quoting a pattern lets the program expand it consistently across shells. Matches are processed in sorted order; a pattern without matching files causes an error.
-
-Each input is read as `cp1252`. Duplicate transactions with the same account and reference are written only once; the first occurrence in input order is retained. The resulting transactions are sorted by `reference` in descending order and written with one output header. The semicolon-delimited output is encoded as UTF-8 with BOM (`utf-8-sig`). No input may be the same file as the output.
+Patterns support `*`, `?`, and recursive `**`. Arguments retain their order; wildcard matches are sorted by path. Unmatched patterns cause an error.
 
 ## Input format
 
-Each non-empty line must match the BAWAG export layout:
+Input is read as `cp1252`, without a header. Both layouts can occur in the same file or invocation.
+
+**Giro account:**
 
 ```text
 AT##################;Description TT/123456789|Extra data;DD.MM.YYYY;DD.MM.YYYY;+1.234,56;EUR
 ```
 
-The parser expects an Austrian account number, a two-letter transaction type, a nine-digit reference, two dates, a signed European-format amount, and a three-letter currency code. Header rows and unsupported layouts cause an error containing the line number.
+**Credit card:**
 
-## Output columns
+```text
+AT##################;Example Shop|01234567890123456789012;DD.MM.YYYY;DD.MM.YYYY;-12,34;EUR
+AT##################;EINZUGSBETRAG;DD.MM.YYYY;DD.MM.YYYY;+12,34;EUR
+```
+
+Both require an Austrian account number, `DD.MM.YYYY` dates, a signed European-format amount, and a three-letter currency. Giro rows also require a two-letter transaction type and nine-digit reference; their supplementary data is optional. Credit card booking dates must be valid calendar dates.
+
+For credit cards, text before `|` becomes both `description` and `counterparty`; the optional numeric suffix becomes `counterparty_iban`. This identifier is **not an IBAN** and retains its full length and leading zeros. Without `|`, the text remains in `description`, while `counterparty` and `counterparty_iban` stay empty. `transaction_type`, `reference`, and `counterparty_bic` stay empty.
+
+Empty lines are skipped. Headers, malformed non-empty lines, and unsupported layouts fail with a line number; malformed giro markers are not treated as credit card descriptions.
+
+## Output
 
 ```text
 account;description;transaction_type;reference;booking_date;value_date;
 amount;currency;counterparty;counterparty_iban;counterparty_bic
 ```
 
-The program normalizes text, merges supplementary data into the description, and collapses consecutive periods in descriptions to one period. It validates detected IBANs with modulo 97 and recognizes counterparties from IBAN/BIC data, card payments, POS transactions, and legacy formats. Unavailable counterparty fields remain empty.
+Output uses semicolons, one header, and UTF-8 with BOM (`utf-8-sig`). Dates and amounts remain strings. Missing fields are empty.
 
-German values such as `Bezahlung Karte` and `Gutschrift POS` are intentionally used internally because they appear in BAWAG exports.
+- **Cleaning:** normalize whitespace and backslashes, merge supplementary text into descriptions, and collapse consecutive periods only in `description`.
+- **Counterparties:** giro rules recognize IBAN/BIC, card, POS, and legacy formats; the first successful rule wins. Detected IBANs require a valid modulo-97 checksum; numeric credit card identifiers are exempt.
+- **Duplicates:** match by account plus giro reference or credit card identifier, keeping the first occurrence. The two identifier types are separate; rows without identifiers are all retained.
+- **Sorting:** giro rows first, by reference descending; credit card rows next, by booking date newest first, including rows without identifiers. Equal sort keys retain input order.
+- **Logging:** only after a successful export, stderr reports the total removed, including zero: `Info: removed 0 duplicate transactions.`
 
 ## Safety and privacy
 
-Output is written to a temporary file and replaces the target only after all input files have been processed successfully. On failure, existing output remains unchanged.
+Input and output must be different files. Output is written to a temporary file and replaces the target only on success; failures preserve existing output and remove temporary files.
 
-Bank exports contain sensitive data. Use synthetic test data and do not commit real CSV files. CSV files are not globally excluded by `.gitignore`.
+Bank exports contain sensitive data. Use synthetic test fixtures and never commit real CSV files; `.gitignore` does not globally exclude them.
 
 ## License
 
