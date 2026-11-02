@@ -39,7 +39,7 @@ account;description;transaction_type;reference;booking_date;value_date;
 amount;currency;counterparty;counterparty_iban;counterparty_bic
 ```
 
-The program normalizes text, merges supplementary data into the description, validates detected IBANs with modulo 97, and recognizes counterparties from IBAN/BIC data, card payments, POS transactions, and legacy formats. Unavailable counterparty fields remain empty.
+The program normalizes text, merges supplementary data into the description, and collapses consecutive periods in descriptions to one period. It validates detected IBANs with modulo 97 and recognizes counterparties from IBAN/BIC data, card payments, POS transactions, and legacy formats. Unavailable counterparty fields remain empty.
 
 German values such as `Bezahlung Karte` and `Gutschrift POS` are intentionally used internally because they appear in BAWAG exports.
 

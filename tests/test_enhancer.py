@@ -15,6 +15,19 @@ import enhancer
 VALID_IBAN = "AT611904300234573201"
 VALID_BIC = "BKAUATWW"
 ACCOUNT = "AT123456789012345678"
+EXPECTED_OUTPUT_COLUMNS = [
+    "account",
+    "description",
+    "transaction_type",
+    "reference",
+    "booking_date",
+    "value_date",
+    "amount",
+    "currency",
+    "counterparty",
+    "counterparty_iban",
+    "counterparty_bic",
+]
 
 
 def transaction_line(
@@ -150,7 +163,7 @@ class CounterpartyExtractionTests(unittest.TestCase):
             counterparty_row(
                 "Bezahlung Karte",
                 "MC",
-                f"{VALID_BIC} {VALID_IBAN}|Bank Party|Card Merchant",
+                f"Terminal|Card Merchant|{VALID_BIC} {VALID_IBAN}|Bank Party",
             )
         )
 
@@ -257,6 +270,42 @@ class FileProcessingTests(unittest.TestCase):
     def write_input(self, path: Path, lines: list[str]) -> None:
         path.write_text("\n".join(lines) + "\n", encoding="cp1252")
 
+    def test_parse_input_file_collapses_consecutive_periods_in_description(self) -> None:
+        cases = (
+            ("Payment... pending..", "", "Payment. pending."),
+            ("Payment.", "Reference.... end..", "Payment. Reference. end."),
+            ("Version 1.2", "", "Version 1.2"),
+            ("Payment", "", "Payment"),
+            ("", "Reference...", "Reference."),
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_path = Path(temporary_directory) / "input.csv"
+            for description, extra, expected in cases:
+                with self.subTest(description=description, extra=extra):
+                    self.write_input(
+                        input_path,
+                        [transaction_line(description=description, extra=extra)],
+                    )
+
+                    rows = list(enhancer.parse_input_file(input_path))
+
+                    self.assertEqual(rows[0]["description"], expected)
+
+    def test_description_normalization_preserves_other_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "input.csv"
+            self.write_input(
+                input_path,
+                [transaction_line(extra=f"{VALID_IBAN}|Example.. Ltd.", amount="-1.234,56")],
+            )
+
+            row = next(enhancer.parse_input_file(input_path))
+
+            self.assertEqual(row["description"], "Payment Example. Ltd.")
+            self.assertEqual(row["counterparty"], "Example.. Ltd.")
+            self.assertEqual(row["booking_date"], "01.01.2025")
+            self.assertEqual(row["amount"], "-1.234,56")
+
     def test_parse_input_file_parses_every_output_column(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             input_path = Path(directory) / "input.csv"
@@ -289,7 +338,7 @@ class FileProcessingTests(unittest.TestCase):
                 "counterparty_iban": VALID_IBAN,
                 "counterparty_bic": VALID_BIC,
             }
-            self.assertEqual(list(rows[0]), enhancer.OUTPUT_COLUMNS)
+            self.assertEqual(list(rows[0]), EXPECTED_OUTPUT_COLUMNS)
             for column, expected_value in expected.items():
                 with self.subTest(column=column):
                     self.assertEqual(rows[0][column], expected_value)
@@ -341,6 +390,28 @@ class FileProcessingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, expected_error):
                 list(enhancer.parse_input_file(input_path))
 
+    def test_parse_input_file_rejects_unsupported_layouts(self) -> None:
+        cases = {
+            "header": ";".join(enhancer.OUTPUT_COLUMNS),
+            "whitespace": "   ",
+            "account": transaction_line(account="DE123456789012345678"),
+            "reference": transaction_line(reference="12345678"),
+            "transaction_type": transaction_line(transaction_type="za"),
+            "booking_date": transaction_line(booking_date="2025-01-01"),
+            "value_date": transaction_line(value_date="2.1.2025"),
+            "unsigned_amount": transaction_line(amount="1,00"),
+            "decimal_separator": transaction_line(amount="+1.00"),
+            "thousands_grouping": transaction_line(amount="+12.34,56"),
+            "extra_column": transaction_line() + ";unexpected",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "input.csv"
+            for name, line in cases.items():
+                with self.subTest(layout=name):
+                    self.write_input(input_path, ["", line])
+                    with self.assertRaisesRegex(ValueError, "Line 2 .*expected format"):
+                        list(enhancer.parse_input_file(input_path))
+
     def test_write_output_file_creates_parent_header_and_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "nested" / "output.csv"
@@ -353,7 +424,7 @@ class FileProcessingTests(unittest.TestCase):
 
             self.assertEqual(row_count, 2)
             text = output.read_text(encoding="utf-8-sig")
-            self.assertEqual(text.splitlines()[0], ";".join(enhancer.OUTPUT_COLUMNS))
+            self.assertEqual(text.splitlines()[0], ";".join(EXPECTED_OUTPUT_COLUMNS))
             with output.open("r", encoding="utf-8-sig", newline="") as output_file:
                 written_rows = list(csv.DictReader(output_file, delimiter=";"))
             self.assertEqual([row["description"] for row in written_rows], ["First", "Second"])
@@ -386,19 +457,67 @@ class FileProcessingTests(unittest.TestCase):
 
             self.assertFalse(output.exists())
 
+    def test_write_output_file_preserves_output_when_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output.csv"
+            output.write_bytes(b"existing output")
+
+            with patch.object(Path, "replace", side_effect=PermissionError("output locked")):
+                with self.assertRaisesRegex(PermissionError, "output locked"):
+                    enhancer.write_output_file([output_row(description="New")], output)
+
+            self.assertEqual(output.read_bytes(), b"existing output")
+            self.assertEqual(list(root.glob(".output.csv.*.tmp")), [])
+
+    def test_write_output_file_cleans_up_after_keyboard_interrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output.csv"
+
+            def interrupted_rows():
+                yield output_row(description="First")
+                raise KeyboardInterrupt
+
+            with self.assertRaises(KeyboardInterrupt):
+                enhancer.write_output_file(interrupted_rows(), output)
+
+            self.assertFalse(output.exists())
+            self.assertEqual(list(root.glob(".output.csv.*.tmp")), [])
+
+    def test_write_output_file_replaces_output_with_bom_and_quoted_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.csv"
+            output.write_bytes(b"existing output")
+            description = 'Invoice; "Example"\nSecond line'
+
+            self.assertEqual(
+                enhancer.write_output_file([output_row(description=description)], output),
+                1,
+            )
+
+            self.assertTrue(output.read_bytes().startswith(b"\xef\xbb\xbf"))
+            with output.open("r", encoding="utf-8-sig", newline="") as output_file:
+                reader = csv.DictReader(output_file, delimiter=";")
+                self.assertEqual(reader.fieldnames, EXPECTED_OUTPUT_COLUMNS)
+                self.assertEqual(list(reader), [output_row(description=description)])
+
     def test_parse_files_sorts_transactions_by_reference(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             first = root / "first.csv"
             second = root / "second.csv"
             output = root / "combined.csv"
-            self.write_input(first, [transaction_line(description="First")])
+            self.write_input(
+                first,
+                [transaction_line(description="First", reference="123456788")],
+            )
             self.write_input(
                 second,
                 [
                     transaction_line(
                         description="Second",
-                        reference="123456788",
+                        reference="123456789",
                         amount="-2,50",
                     )
                 ],
@@ -409,7 +528,7 @@ class FileProcessingTests(unittest.TestCase):
             self.assertEqual(row_count, 2)
             with output.open("r", encoding="utf-8-sig", newline="") as output_file:
                 rows = list(csv.DictReader(output_file, delimiter=";"))
-            self.assertEqual([row["description"] for row in rows], ["First", "Second"])
+            self.assertEqual([row["description"] for row in rows], ["Second", "First"])
             self.assertEqual(
                 [row["reference"] for row in rows],
                 ["123456789", "123456788"],
@@ -427,6 +546,21 @@ class FileProcessingTests(unittest.TestCase):
             expanded_paths = enhancer.expand_input_paths([root / "*.csv"])
 
             self.assertEqual(expanded_paths, [first, second])
+
+    def test_expand_input_paths_recurses_and_preserves_argument_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nested = root / "nested"
+            nested.mkdir()
+            first = root / "a.csv"
+            second = nested / "b.csv"
+            explicit = root / "explicit.txt"
+            for path in (first, second, explicit):
+                self.write_input(path, [transaction_line()])
+
+            paths = enhancer.expand_input_paths([explicit, root / "**" / "*.csv", first])
+
+            self.assertEqual(paths, [explicit, first, second, first])
 
     def test_parse_files_removes_duplicate_transactions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -501,7 +635,7 @@ class FileProcessingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must not be identical"):
                 enhancer.parse_files([path], path)
 
-    def test_malformed_later_input_preserves_output_and_removes_temporary_file(self) -> None:
+    def test_malformed_later_input_preserves_output_without_temporary_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             valid = root / "valid.csv"
@@ -520,6 +654,26 @@ class FileProcessingTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_main_reports_malformed_input_and_preserves_existing_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "input.csv"
+            output = root / "output.csv"
+            input_path.write_text("invalid transaction\n", encoding="cp1252")
+            output.write_bytes(b"existing output")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with patch.object(
+                sys, "argv", ["enhancer.py", str(input_path), str(output)]
+            ), redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = enhancer.main()
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(f"Error: Line 1 in '{input_path}'", stderr.getvalue())
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(output.read_bytes(), b"existing output")
+
     def test_main_combines_multiple_inputs_and_reports_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

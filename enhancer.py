@@ -125,9 +125,9 @@ def clean_merchant(value: str) -> str:
 
 def extract_counterparty(row: dict[str, str]) -> dict[str, str]:
     """Identify a counterparty using IBAN, card, and legacy-format rules."""
-    description = row["description"].strip()
+    description = row["description"]
     transaction_type = row["transaction_type"]
-    extra = row["extra"].strip()
+    extra = row["extra"]
     segments = [segment.strip() for segment in extra.split("|")] if extra else []
 
     result = {
@@ -218,9 +218,8 @@ def parse_input_file(input_path: Path) -> Iterator[dict[str, str]]:
             row = {key: clean_text(value) for key, value in row.items()}
 
             description = row["description"].rstrip("|").rstrip()
-            row["description"] = " ".join(
-                part for part in (description, row["extra"]) if part
-            ).rstrip("|").rstrip()
+            description = " ".join(part for part in (description, row["extra"]) if part).rstrip("|").rstrip()
+            row["description"] = re.sub(r"\.{2,}", ".", description.replace("|", ""))
             del row["extra"]
 
             yield row
