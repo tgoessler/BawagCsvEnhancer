@@ -31,13 +31,20 @@ LINE_PATTERN = re.compile(
     + TRANSACTION_DETAILS_PATTERN
 )
 
+CASH_WITHDRAWAL_FEE_MARKER = "BARAUSZAHLUNGSGEBUEHR"
+
 # Reject malformed giro markers instead of accepting them as merchant names.
 # The numeric card identifier is stored in counterparty_iban, but is not an IBAN.
 CREDIT_CARD_LINE_PATTERN = re.compile(
     r"^(?P<account>AT\d{18});"
     r"(?![^;]*[A-Za-z]{2}/[0-9]+(?:\||;))"
     r"(?P<description>[^;|\r\n]*[^\s;|])[ \t]*"
-    r"(?:\|(?P<counterparty_iban>[0-9]+))?"
+    r"(?:\|(?:"
+    rf"(?P<cash_fee>{CASH_WITHDRAWAL_FEE_MARKER})"
+    # An identifier may follow detail text, but not another ID or a cash fee marker.
+    rf"|(?:(?P<extra>(?!\s*(?:\d+|{CASH_WITHDRAWAL_FEE_MARKER})\s*\|)"
+    r"[^;|\r\n]*[^\s;|])[ \t]*\|)?(?P<counterparty_iban>[0-9]+)"
+    r"))?"
     + TRANSACTION_DETAILS_PATTERN
 )
 
@@ -230,12 +237,13 @@ def parse_input_file(input_path: Path) -> Iterator[dict[str, str]]:
             if match.re is CREDIT_CARD_LINE_PATTERN:
                 if row["counterparty_iban"]:
                     row["counterparty"] = row["description"]
+                row["extra"] = row.pop("cash_fee") or row["extra"]
             else:
+                # Extract counterparties before removing account data and separators.
                 row.update(extract_counterparty(row))
+                row["extra"] = clean_extra(row["extra"])
 
-            # Extract counterparties before removing account data and separators.
-            # Only the remaining supplementary text is merged into the description.
-            extra = clean_text(clean_extra(row.pop("extra", "")))
+            extra = clean_text(row.pop("extra"))
             row = {key: clean_text(value) for key, value in row.items()}
 
             description = row["description"].rstrip("|").rstrip()
@@ -256,7 +264,13 @@ def deduplicate_rows(
         if row["reference"]:
             transaction_key = (row["account"], "reference", row["reference"])
         elif not row["transaction_type"] and row["counterparty_iban"]:
-            transaction_key = (row["account"], "credit_card", row["counterparty_iban"])
+            # A foreign-currency purchase and its fee can share the same identifier.
+            kind = (
+                "credit_card_fx_fee"
+                if row["counterparty"].casefold() == "manipulationsentgelt"
+                else "credit_card"
+            )
+            transaction_key = (row["account"], kind, row["counterparty_iban"])
         else:
             # Identical-looking rows without an identifier may be distinct payments.
             yield row

@@ -313,6 +313,71 @@ class FileProcessingTests(unittest.TestCase):
             "counterparty_bic": "",
         })
 
+    def test_parse_credit_card_cash_withdrawal_fees_without_identifiers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "card.csv"
+            output = root / "output.csv"
+            fee = (
+                f"{ACCOUNT};Cash withdrawal fee|BARAUSZAHLUNGSGEBUEHR;"
+                "21.01.2025;19.01.2025;-3,00;EUR"
+            )
+            self.write_input(input_path, [fee, fee])
+
+            self.assertEqual(enhancer.parse_files([input_path], output), 2)
+
+            with output.open("r", encoding="utf-8-sig", newline="") as output_file:
+                reader = csv.DictReader(output_file, delimiter=";")
+                self.assertEqual(reader.fieldnames, EXPECTED_OUTPUT_COLUMNS)
+                rows = list(reader)
+
+        self.assertEqual(rows, [output_row(
+            account=ACCOUNT,
+            description="Cash withdrawal fee BARAUSZAHLUNGSGEBUEHR",
+            booking_date="21.01.2025",
+            value_date="19.01.2025",
+            amount="-3,00",
+            currency="EUR",
+        )] * 2)
+
+    def test_parse_credit_card_details_and_deduplicate_shared_id_fees_separately(self) -> None:
+        identifier = "01234567890123456789012"
+        withdrawal_id = "00000000000000000000023"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "card.csv"
+            output = root / "output.csv"
+            fee = f"{ACCOUNT};Manipulationsentgelt|USD 15,00|{identifier};21.01.2025;19.01.2025;-0,20;EUR"
+            purchase = f"{ACCOUNT};Example Shop|USD 15,00|{identifier};21.01.2025;19.01.2025;-12,34;EUR"
+            withdrawal = (
+                f"{ACCOUNT};Cash withdrawal|Example ATM {VALID_IBAN}|{withdrawal_id};"
+                "21.01.2025;19.01.2025;-50,00;EUR"
+            )
+            self.write_input(input_path, [
+                fee, purchase, withdrawal, fee.replace("-0,20", "-0,21"),
+                purchase.replace("-12,34", "-12,35"),
+            ])
+
+            self.assertEqual(enhancer.parse_files([input_path], output), 3)
+
+            with output.open("r", encoding="utf-8-sig", newline="") as output_file:
+                reader = csv.DictReader(output_file, delimiter=";")
+                self.assertEqual(reader.fieldnames, EXPECTED_OUTPUT_COLUMNS)
+                rows = list(reader)
+
+        self.assertEqual(rows, [
+            output_row(
+                account=ACCOUNT, description=description, counterparty=counterparty,
+                counterparty_iban=number, booking_date="21.01.2025", value_date="19.01.2025",
+                amount=amount, currency="EUR",
+            )
+            for description, counterparty, number, amount in (
+                ("Manipulationsentgelt USD 15,00", "Manipulationsentgelt", identifier, "-0,20"),
+                ("Example Shop USD 15,00", "Example Shop", identifier, "-12,34"),
+                (f"Cash withdrawal Example ATM {VALID_IBAN}", "Cash withdrawal", withdrawal_id, "-50,00"),
+            )
+        ])
+
     def test_parse_files_combines_card_and_bank_rows_without_losing_unreferenced_rows(self) -> None:
         reference = "01234567890123456789012"
         with tempfile.TemporaryDirectory() as directory:
@@ -398,7 +463,18 @@ class FileProcessingTests(unittest.TestCase):
         self.assertTrue(all(row["reference"] == "" for row in rows))
 
     def test_parse_credit_card_rejects_malformed_rows_and_preserves_output(self) -> None:
-        descriptions = ("Shop|ABC123", "Shop|", "Shop|123|456", "")
+        descriptions = (
+            "Shop|ABC123",
+            "Shop|",
+            "Shop|123|456",
+            "Shop| |123",
+            "Shop|USD 15,00|ABC123",
+            "Shop|USD 15,00|Extra|123",
+            "Shop ZA/12345|USD 15,00|123",
+            "Cash withdrawal fee|BARAUSZAHLUNGSGEBUEHRX",
+            "Cash withdrawal fee|BARAUSZAHLUNGSGEBUEHR|123",
+            "",
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             input_path = root / "card.csv"

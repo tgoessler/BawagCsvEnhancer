@@ -13,15 +13,16 @@ python -m py_compile enhancer.py
 python -m unittest discover -v
 ```
 
-There is currently no test suite or third-party dependency configuration.
+On Windows, use `py` instead of `python`. The `unittest` suite is in `tests/` and requires no third-party dependencies.
 
 ## Change guidelines
 
 - Prefer focused, standard-library-only changes with type hints and concise docstrings.
-- Preserve strict parsing: malformed non-empty lines and unknown layouts must fail clearly.
+- Preserve strict parsing: malformed non-empty lines and unknown layouts must fail clearly. Match standalone credit card text suffixes explicitly; keep supplementary text separate from identifiers.
 - Preserve `OUTPUT_COLUMNS` names and order unless a schema change is requested.
 - Keep dates and amounts as strings.
 - Preserve counterparty rule precedence; the first successful rule wins.
+- Keep shared-ID card purchases and their foreign-currency fees separate when deduplicating.
 - Preserve temporary-file cleanup and atomic output replacement.
 - Update `README.md` whenever public behavior changes.
 
