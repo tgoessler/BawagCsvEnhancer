@@ -462,6 +462,23 @@ class FileProcessingTests(unittest.TestCase):
         ])
         self.assertTrue(all(row["reference"] == "" for row in rows))
 
+    def test_invalid_card_booking_date_is_not_hidden_by_deduplication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "card.csv"
+            output = root / "output.csv"
+            valid = f"{ACCOUNT};Example Shop|01234567890123456789012;29.02.2024;01.03.2024;-1,00;EUR"
+            invalid = valid.replace("29.02.2024", "29.02.2025")
+            self.write_input(input_path, [valid, invalid])
+            output.write_bytes(b"existing output")
+
+            message = f"Line 2 in '{input_path}' has an invalid credit card booking date."
+            with self.assertRaisesRegex(ValueError, re.escape(message)):
+                enhancer.parse_files([input_path], output, input_format="credit-card")
+
+            self.assertEqual(output.read_bytes(), b"existing output")
+            self.assertEqual(list(root.glob(".output.csv.*.tmp")), [])
+
     def test_parse_credit_card_rejects_malformed_rows_and_preserves_output(self) -> None:
         descriptions = (
             "Shop|ABC123",
@@ -624,6 +641,7 @@ class FileProcessingTests(unittest.TestCase):
             "decimal_separator": transaction_line(amount="+1.00"),
             "thousands_grouping": transaction_line(amount="+12.34,56"),
             "extra_column": transaction_line() + ";unexpected",
+            "extra_column_before_giro_marker": transaction_line(description="Payment;Unexpected field"),
         }
         with tempfile.TemporaryDirectory() as directory:
             input_path = Path(directory) / "input.csv"
@@ -856,6 +874,24 @@ class FileProcessingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must not be identical"):
                 enhancer.parse_files([path], path)
 
+    def test_parse_files_rejects_output_hard_link_to_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "input.csv"
+            output = root / "output.csv"
+            self.write_input(input_path, [transaction_line()])
+            try:
+                output.hardlink_to(input_path)
+            except OSError as error:
+                self.skipTest(f"Hard links unavailable: {error}")
+            original = input_path.read_bytes()
+
+            with self.assertRaisesRegex(ValueError, "must not be identical"):
+                enhancer.parse_files([input_path], output)
+
+            self.assertTrue(output.samefile(input_path))
+            self.assertEqual(output.read_bytes(), original)
+
     def test_malformed_later_input_preserves_output_without_temporary_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -982,7 +1018,7 @@ class CliTests(unittest.TestCase):
             root = Path(directory)
             input_path = root / "input.csv"
             output = root / "output.csv"
-            input_path.write_text("invalid transaction\n", encoding="cp1252")
+            input_path.write_text(f"{ACCOUNT};Private transaction details\n", encoding="cp1252")
             output.write_bytes(b"existing output")
             stdout = io.StringIO()
             stderr = io.StringIO()
@@ -993,7 +1029,10 @@ class CliTests(unittest.TestCase):
                 exit_code = enhancer.main()
 
             self.assertEqual(exit_code, 1)
-            self.assertIn(f"Error: Line 1 in '{input_path}'", stderr.getvalue())
+            self.assertEqual(
+                stderr.getvalue(),
+                f"Error: Line 1 in '{input_path}' does not match the expected format.\n",
+            )
             self.assertEqual(stdout.getvalue(), "")
             self.assertEqual(output.read_bytes(), b"existing output")
 

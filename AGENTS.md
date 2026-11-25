@@ -23,10 +23,10 @@ On Windows, use `py` instead of `python`. The `unittest` suite is in `tests/` an
 - Preserve `OUTPUT_COLUMNS` names and order unless a schema change is requested.
 - Keep dates and amounts as strings.
 - Preserve counterparty rule precedence; the first successful rule wins.
-- Keep shared-ID card purchases and their foreign-currency fees separate when deduplicating.
+- Validate all rows before deduplication. Keep shared-ID card purchases and their foreign-currency fees separate when deduplicating.
 - Preserve temporary-file cleanup and atomic output replacement.
 - Update `README.md` whenever public behavior changes.
 
-For parser changes, use synthetic fixtures covering valid and malformed input, affected counterparty formats, cleanup behavior, exact output headers, and failure handling. Prefer `unittest` and temporary directories.
+For parser changes, use synthetic fixtures covering valid and malformed input, affected counterparty formats, cleanup behavior, exact output headers, and failure handling. Prefer `unittest` and temporary directories. If local reference CSVs are available, compare new exports byte for byte using temporary outputs without overwriting the references.
 
-Follow the privacy guidance in `README.md` and check `git status` before finishing.
+Follow the privacy guidance in `README.md`: do not echo raw transactions in diagnostics. Check `git status` before finishing.

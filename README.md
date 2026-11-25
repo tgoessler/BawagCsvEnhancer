@@ -4,7 +4,7 @@ A dependency-free Python CLI that cleans BAWAG/PSK giro and credit card exports 
 
 ## Requirements and usage
 
-Requires Python 3.10 or newer.
+Requires Python 3.10 or newer. On Windows, use `py` instead of `python` in the examples below.
 
 ```bash
 python enhancer.py [--format {auto,giro,credit-card}] <input.csv> [<input.csv> ...] <output.csv>
@@ -16,7 +16,7 @@ Multiple files and quoted wildcard patterns are supported, for example:
 python enhancer.py "exports/*.csv" cleaned-transactions.csv
 ```
 
-Patterns support `*`, `?`, and recursive `**`. Arguments retain their order; wildcard matches are sorted by path. Unmatched patterns cause an error.
+Patterns support `*`, `?`, bracket expressions such as `[0-9]`, and recursive `**`. Arguments retain their order; wildcard matches are sorted by path. A pattern that matches no files causes an error.
 
 By default (`--format auto`), the layout is detected for each row, so mixed exports are accepted. Use `--format giro` or `--format credit-card` to require that layout for every transaction in all input files. A mismatch reports the file and line number and leaves any existing output untouched.
 
@@ -27,7 +27,7 @@ python enhancer.py --format credit-card "card-exports/BAWAG_*.csv" cleaned-card.
 
 ## Input format
 
-Input is read as `cp1252`, without a header.
+Input is read as `cp1252`, without a header. Each transaction must contain exactly six semicolon-separated fields.
 
 **Giro account:**
 
@@ -45,19 +45,18 @@ AT##################;EINZUGSBETRAG;DD.MM.YYYY;DD.MM.YYYY;+12,34;EUR
 AT##################;Cash withdrawal fee|BARAUSZAHLUNGSGEBUEHR;DD.MM.YYYY;DD.MM.YYYY;-3,00;EUR
 ```
 
-Both require an Austrian account number, `DD.MM.YYYY` dates, a signed European-format amount, and a three-letter currency. Giro rows also require a two-letter transaction type and nine-digit reference; their supplementary data is optional. Credit card booking dates must be valid calendar dates.
+Both layouts require `AT` followed by 18 digits in the account field, `DD.MM.YYYY` dates, a signed European-format amount, and a three-letter uppercase currency code. Giro rows also require a two-letter transaction type and nine-digit reference; their supplementary data is optional. Credit card booking dates are checked for calendar validity, even in duplicate rows. Other date fields are checked for format only.
 
 For credit card rows with a numeric identifier after `|`, the text before the first `|` becomes both `description` and `counterparty`. If there is an extra text segment between that text and the identifier, it is appended to `description` with a space. The middle segment must not be empty, all digits, or the cash withdrawal fee marker. The identifier becomes `counterparty_iban`; it is **not an IBAN** and retains its full length and leading zeros.
 
 For cash withdrawal fees, `|BARAUSZAHLUNGSGEBUEHR` becomes ` BARAUSZAHLUNGSGEBUEHR` in `description`, leaving `counterparty` and `counterparty_iban` empty, just like rows without a suffix. No other non-numeric suffix is accepted without a final identifier. `transaction_type`, `reference`, and `counterparty_bic` stay empty for all credit card rows.
 
-Empty lines are skipped. Headers, malformed non-empty lines, and unsupported layouts fail with a line number; malformed giro markers are not treated as credit card descriptions.
+Empty lines are skipped. Headers, malformed non-empty lines, and unsupported layouts fail with the file and line number, without printing the transaction contents. A malformed giro marker such as `ZA/12345` directly before `|` or `;` is not treated as a credit card description.
 
 ## Output
 
 ```text
-account;description;transaction_type;reference;booking_date;value_date;
-amount;currency;counterparty;counterparty_iban;counterparty_bic
+account;description;transaction_type;reference;booking_date;value_date;amount;currency;counterparty;counterparty_iban;counterparty_bic
 ```
 
 Output uses semicolons, one header, and UTF-8 with BOM (`utf-8-sig`). Dates and amounts remain strings. Missing fields are empty.
@@ -70,7 +69,7 @@ Output uses semicolons, one header, and UTF-8 with BOM (`utf-8-sig`). Dates and 
 
 ## Safety and privacy
 
-Input and output must be different files. Output is written to a temporary file and replaces the target only on success; failures preserve existing output and remove temporary files.
+Input and output must be different files; a hard link or symbolic link to an input is not a valid output. Output is written to a temporary file and replaces the target only on success; failures preserve existing output and remove temporary files.
 
 Bank exports contain sensitive data. Use synthetic test fixtures and never commit real CSV files; `.gitignore` does not globally exclude them.
 

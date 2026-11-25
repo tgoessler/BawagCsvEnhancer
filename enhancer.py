@@ -9,7 +9,7 @@ import re
 import sys
 import tempfile
 from collections.abc import Iterable, Iterator
-from datetime import datetime
+from datetime import date
 from glob import glob, has_magic
 from pathlib import Path
 from typing import Literal, get_args
@@ -28,7 +28,7 @@ TRANSACTION_DETAILS_PATTERN = (
 
 LINE_PATTERN = re.compile(
     r"^(?P<account>AT\d{18});"
-    r"(?P<description>.*?)[ \t]*"
+    r"(?P<description>[^;\r\n]*?)[ \t]*"
     r"(?P<transaction_type>[A-Z]{2})/(?P<reference>\d{9})"
     r"(?:\|(?P<extra>[^;\r\n]*))?"
     + TRANSACTION_DETAILS_PATTERN
@@ -225,6 +225,12 @@ def extract_counterparty(row: dict[str, str]) -> dict[str, str]:
     return result
 
 
+def to_iso_date(value: str) -> str:
+    """Reorder a DD.MM.YYYY date for calendar validation and sorting."""
+    day, month, year = value.split(".")
+    return f"{year}-{month}-{day}"
+
+
 def parse_input_file(
     input_path: Path, *, input_format: InputFormat = "auto"
 ) -> Iterator[dict[str, str]]:
@@ -239,8 +245,7 @@ def parse_input_file(
             match = LINE_PATTERN.fullmatch(line) or CREDIT_CARD_LINE_PATTERN.fullmatch(line)
             if match is None:
                 raise ValueError(
-                    f"Line {line_number} in '{input_path}' does not match "
-                    f"the expected format:\n{line}"
+                    f"Line {line_number} in '{input_path}' does not match the expected format."
                 )
 
             detected_format = "giro" if match.re is LINE_PATTERN else "credit-card"
@@ -254,6 +259,13 @@ def parse_input_file(
             row = {column: "" for column in OUTPUT_COLUMNS}
             row.update(match.groupdict(default=""))
             if detected_format == "credit-card":
+                # Check every date here so deduplication cannot hide invalid rows.
+                try:
+                    date.fromisoformat(to_iso_date(row["booking_date"]))
+                except ValueError:
+                    raise ValueError(
+                        f"Line {line_number} in '{input_path}' has an invalid credit card booking date."
+                    ) from None
                 if row["counterparty_iban"]:
                     row["counterparty"] = row["description"]
                 row["extra"] = row.pop("cash_fee") or row["extra"]
@@ -309,9 +321,8 @@ def sort_rows_by_reference(
         # With reverse=True, giro rows (True) precede card rows (False).
         if row["reference"]:
             return True, row["reference"]
-        # DD.MM.YYYY cannot be sorted alphabetically; ISO dates can.
-        booking_date = datetime.strptime(row["booking_date"], "%d.%m.%Y")
-        return False, booking_date.date().isoformat()
+        # The parser already validated the date; only reorder its components here.
+        return False, to_iso_date(row["booking_date"])
 
     # Python's stable sort preserves input order when keys are equal.
     return sorted(rows, key=sort_key, reverse=True)
@@ -390,10 +401,13 @@ def parse_files(
 
     input_paths = expand_input_paths(input_paths)
     resolved_output = output_path.resolve()
+    output_exists = resolved_output.exists()
     for input_path in input_paths:
         if not input_path.is_file():
             raise FileNotFoundError(f"Input file not found: {input_path}")
-        if input_path.resolve() == resolved_output:
+        if input_path.resolve() == resolved_output or (
+            output_exists and input_path.samefile(resolved_output)
+        ):
             raise ValueError("Input and output files must not be identical.")
 
     input_count = 0
