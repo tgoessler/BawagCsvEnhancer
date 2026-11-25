@@ -7,7 +7,7 @@ A dependency-free Python CLI that cleans BAWAG/PSK giro and credit card exports 
 Requires Python 3.10 or newer.
 
 ```bash
-python enhancer.py <input.csv> [<input.csv> ...] <output.csv>
+python enhancer.py [--format {auto,giro,credit-card}] <input.csv> [<input.csv> ...] <output.csv>
 ```
 
 Multiple files and quoted wildcard patterns are supported, for example:
@@ -18,9 +18,16 @@ python enhancer.py "exports/*.csv" cleaned-transactions.csv
 
 Patterns support `*`, `?`, and recursive `**`. Arguments retain their order; wildcard matches are sorted by path. Unmatched patterns cause an error.
 
+By default (`--format auto`), the layout is detected for each row, so mixed exports are accepted. Use `--format giro` or `--format credit-card` to require that layout for every transaction in all input files. A mismatch reports the file and line number and leaves any existing output untouched.
+
+```bash
+python enhancer.py --format giro "giro-exports/BAWAG_*.csv" cleaned-giro.csv
+python enhancer.py --format credit-card "card-exports/BAWAG_*.csv" cleaned-card.csv
+```
+
 ## Input format
 
-Input is read as `cp1252`, without a header. Both layouts can occur in the same file or invocation.
+Input is read as `cp1252`, without a header.
 
 **Giro account:**
 

@@ -875,6 +875,57 @@ class FileProcessingTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_main_accepts_matching_formats_and_mixed_auto(self) -> None:
+        giro = transaction_line()
+        card = f"{ACCOUNT};Example Shop|01234567890123456789012;01.01.2025;02.01.2025;-1,00;EUR"
+        for mode, lines in (("giro", [giro]), ("credit-card", [card]), ("auto", [giro, card])):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                input_path = root / "input.csv"
+                output = root / "output.csv"
+                input_path.write_text("\n".join(lines) + "\n", encoding="cp1252")
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                argv = ["enhancer.py", "--format", mode, str(input_path), str(output)]
+
+                with patch.object(sys, "argv", argv), redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = enhancer.main()
+
+                self.assertEqual(exit_code, 0, stderr.getvalue())
+                self.assertIn(f"Success: wrote {len(lines)} transactions", stdout.getvalue())
+                self.assertTrue(output.is_file())
+
+    def test_main_rejects_mismatched_format_in_later_input_and_preserves_output(self) -> None:
+        lines = {
+            "giro": transaction_line(),
+            "credit-card": f"{ACCOUNT};EINZUGSBETRAG;01.01.2025;01.01.2025;+1,00;EUR",
+        }
+        for expected, actual in (("giro", "credit-card"), ("credit-card", "giro")):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                first = root / "BAWAG_a.csv"
+                second = root / "BAWAG_b.csv"
+                output = root / "output.csv"
+                first.write_text(lines[expected] + "\n", encoding="cp1252")
+                second.write_text("\n" + lines[actual] + "\n", encoding="cp1252")
+                output.write_bytes(b"existing output")
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                argv = ["enhancer.py", "--format", expected, str(root / "BAWAG_*.csv"), str(output)]
+
+                with patch.object(sys, "argv", argv), redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = enhancer.main()
+
+                self.assertEqual(exit_code, 1)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(
+                    stderr.getvalue(),
+                    f"Error: Line 2 in '{second}' uses the {actual} format, "
+                    f"but --format {expected} was requested.\n",
+                )
+                self.assertEqual(output.read_bytes(), b"existing output")
+                self.assertEqual(list(root.glob(".output.csv.*.tmp")), [])
+
     def test_main_reports_duplicate_counts_for_both_formats(self) -> None:
         for reference in ("123456789", "01234567890123456789012"):
             with self.subTest(reference=reference), tempfile.TemporaryDirectory() as directory:

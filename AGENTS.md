@@ -19,6 +19,7 @@ On Windows, use `py` instead of `python`. The `unittest` suite is in `tests/` an
 
 - Prefer focused, standard-library-only changes with type hints and concise docstrings.
 - Preserve strict parsing: malformed non-empty lines and unknown layouts must fail clearly. Match standalone credit card text suffixes explicitly; keep supplementary text separate from identifiers.
+- Keep automatic layout detection as the default. An explicit `--format` must reject mismatched rows, not filter them out.
 - Preserve `OUTPUT_COLUMNS` names and order unless a schema change is requested.
 - Keep dates and amounts as strings.
 - Preserve counterparty rule precedence; the first successful rule wins.

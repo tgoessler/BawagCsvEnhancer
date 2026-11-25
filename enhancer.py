@@ -12,7 +12,10 @@ from collections.abc import Iterable, Iterator
 from datetime import datetime
 from glob import glob, has_magic
 from pathlib import Path
+from typing import Literal, get_args
 
+
+InputFormat = Literal["auto", "giro", "credit-card"]
 
 # Both input layouts share the same date, amount and currency fields.
 TRANSACTION_DETAILS_PATTERN = (
@@ -87,6 +90,13 @@ def parse_arguments() -> argparse.Namespace:
             "Parse and clean a BAWAG/PSK transaction export, identify "
             "counterparties, and write the result to a new CSV file."
         )
+    )
+    parser.add_argument(
+        "--format",
+        dest="input_format",
+        choices=get_args(InputFormat),
+        default="auto",
+        help="Require the specified layout for every input row (default: %(default)s)",
     )
     parser.add_argument(
         "inputs",
@@ -215,8 +225,10 @@ def extract_counterparty(row: dict[str, str]) -> dict[str, str]:
     return result
 
 
-def parse_input_file(input_path: Path) -> Iterator[dict[str, str]]:
-    """Parse one input file and yield its cleaned transaction rows."""
+def parse_input_file(
+    input_path: Path, *, input_format: InputFormat = "auto"
+) -> Iterator[dict[str, str]]:
+    """Validate the expected layout and yield cleaned transaction rows."""
     with input_path.open("r", encoding="cp1252", newline="") as input_file:
         for line_number, raw_line in enumerate(input_file, start=1):
             line = raw_line.rstrip("\r\n")
@@ -231,10 +243,17 @@ def parse_input_file(input_path: Path) -> Iterator[dict[str, str]]:
                     f"the expected format:\n{line}"
                 )
 
+            detected_format = "giro" if match.re is LINE_PATTERN else "credit-card"
+            if input_format != "auto" and detected_format != input_format:
+                raise ValueError(
+                    f"Line {line_number} in '{input_path}' uses the {detected_format} format, "
+                    f"but --format {input_format} was requested."
+                )
+
             # Initialize the complete output schema so missing fields stay empty.
             row = {column: "" for column in OUTPUT_COLUMNS}
             row.update(match.groupdict(default=""))
-            if match.re is CREDIT_CARD_LINE_PATTERN:
+            if detected_format == "credit-card":
                 if row["counterparty_iban"]:
                     row["counterparty"] = row["description"]
                 row["extra"] = row.pop("cash_fee") or row["extra"]
@@ -362,7 +381,9 @@ def expand_input_paths(input_paths: list[Path]) -> list[Path]:
     return expanded_paths
 
 
-def parse_files(input_paths: list[Path], output_path: Path) -> int:
+def parse_files(
+    input_paths: list[Path], output_path: Path, *, input_format: InputFormat = "auto"
+) -> int:
     """Parse input files in order and combine them into one output CSV."""
     if not input_paths:
         raise ValueError("At least one input file is required.")
@@ -380,7 +401,7 @@ def parse_files(input_paths: list[Path], output_path: Path) -> int:
     def read_rows() -> Iterator[dict[str, str]]:
         nonlocal input_count
         for input_path in input_paths:
-            for row in parse_input_file(input_path):
+            for row in parse_input_file(input_path, input_format=input_format):
                 input_count += 1
                 yield row
 
@@ -397,7 +418,7 @@ def main() -> int:
     args = parse_arguments()
 
     try:
-        row_count = parse_files(args.inputs, args.output)
+        row_count = parse_files(args.inputs, args.output, input_format=args.input_format)
     except (OSError, UnicodeError, ValueError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
